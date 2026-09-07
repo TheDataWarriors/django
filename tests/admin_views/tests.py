@@ -576,23 +576,29 @@ class AdminViewBasicTest(AdminViewBasicTestCase):
     def test_popup_add_POST_with_invalid_source_model(self):
         """
         Popup add with an invalid source_model (non-existent app/model)
-        shows an error message instead of crashing.
+        shows an error message on a subsequent page load instead of crashing.
         """
-        post_data = {
-            IS_POPUP_VAR: "1",
-            SOURCE_MODEL_VAR: "admin_views.nonexistent",
-            "title": "Test Article",
-            "content": "some content",
-            "date_0": "2010-09-10",
-            "date_1": "14:55:39",
-        }
-        response = self.client.post(reverse("admin:admin_views_article_add"), post_data)
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "data-popup-response")
-        messages = list(response.wsgi_request._messages)
-        self.assertEqual(len(messages), 1)
-        self.assertIn("admin_views.nonexistent", str(messages[0]))
-        self.assertIn("could not be found", str(messages[0]))
+        for invalid_model in ["admin_views.nonexistent", "invalid"]:
+            post_data = {
+                IS_POPUP_VAR: "1",
+                SOURCE_MODEL_VAR: invalid_model,
+                "title": "Test Article",
+                "content": "some content",
+                "date_0": "2010-09-10",
+                "date_1": "14:55:39",
+            }
+            with self.subTest(case=invalid_model):
+                popup_response = self.client.post(
+                    reverse("admin:admin_views_article_add"), post_data
+                )
+                self.assertEqual(popup_response.status_code, 200)
+                self.assertContains(popup_response, "data-popup-response")
+                # The message is visible on the next request.
+                response = self.client.get(reverse("admin:admin_views_article_add"))
+                messages = list(response.wsgi_request._messages)
+                self.assertEqual(len(messages), 1)
+                self.assertIn(invalid_model, str(messages[0]))
+                self.assertIn("could not be found", str(messages[0]))
 
     def test_popup_add_POST_with_unregistered_source_model(self):
         """
@@ -797,6 +803,21 @@ class AdminViewBasicTest(AdminViewBasicTestCase):
             "Middle content",
             "Oldest content",
             "Results of sorting on Model method are out of order.",
+        )
+
+    def test_change_list_sorting_model_str(self):
+        """Ensure we can sort on a Model.__str__ list_display field."""
+
+        class ArticleStrAdmin(admin.ModelAdmin):
+            list_display = ["__str__"]
+
+        model_admin = ArticleStrAdmin(Article, site)
+        request = RequestFactory().get("/?o=1")
+        request.user = self.superuser
+        cl = model_admin.get_changelist_instance(request)
+        self.assertEqual(cl.get_ordering_field("__str__"), "title")
+        self.assertQuerySetEqual(
+            cl.get_queryset(request), Article.objects.order_by("title", "-pk")
         )
 
     def test_change_list_sorting_model_admin(self):
@@ -3126,6 +3147,41 @@ class AdminViewPermissionsTest(TestCase):
         formset = response.context["inline_admin_formsets"][0]
         self.assertEqual(len(formset.forms), 3)
 
+    def test_save_as_new_with_view_only_inlines(self):
+        self.viewuser.user_permissions.add(
+            get_perm(Section, get_permission_codename("add", Section._meta))
+        )
+        self.client.force_login(self.viewuser)
+        model_admin = site._registry[Section]
+        get_formset_kwargs = model_admin.get_formset_kwargs
+
+        def get_immutable_formset_kwargs(request, obj, inline, prefix):
+            kwargs = get_formset_kwargs(request, obj, inline, prefix)
+            kwargs["data"] = request.POST
+            return kwargs
+
+        # Simulate immutable formset data to ensure save_as_new copies it
+        # before omitting the inline.
+        with mock.patch.object(
+            model_admin,
+            "get_formset_kwargs",
+            side_effect=get_immutable_formset_kwargs,
+        ):
+            response = self.client.post(
+                reverse("admin:admin_views_section_change", args=(self.s1.pk,)),
+                {
+                    "_saveasnew": "Save as new",
+                    "name": "",
+                    "article_set-TOTAL_FORMS": 1,
+                    "article_set-INITIAL_FORMS": 1,
+                },
+            )
+        self.assertContains(response, "Please correct the error below.")
+        inline_formset = response.context["inline_admin_formsets"][0]
+        self.assertEqual(inline_formset.formset.total_form_count(), 0)
+        self.assertEqual(inline_formset.formset.initial_form_count(), 0)
+        self.assertNotContains(response, self.a1.content)
+
     def test_change_view_with_view_only_last_inline(self):
         self.viewuser.user_permissions.add(
             get_perm(Section, get_permission_codename("view", Section._meta))
@@ -3380,6 +3436,24 @@ class AdminViewPermissionsTest(TestCase):
             ["article with ID “foo” doesn’t exist. Perhaps it was deleted?"],
         )
 
+    def test_history_view_without_permission_returns_403(self):
+        self.client.force_login(self.adduser)
+        for label, pk in [("existing", self.a1.pk), ("missing", 999999)]:
+            with self.subTest(pk=label):
+                response = self.client.get(
+                    reverse("admin:admin_views_article_history", args=(pk,))
+                )
+                self.assertEqual(response.status_code, 403)
+
+    def test_history_view_with_view_or_change_permission_success(self):
+        for permission, user in [("view", self.viewuser), ("change", self.changeuser)]:
+            with self.subTest(permission=permission):
+                self.client.force_login(user)
+                response = self.client.get(
+                    reverse("admin:admin_views_article_history", args=(self.a1.pk,))
+                )
+                self.assertEqual(response.status_code, 200)
+
     def test_conditionally_show_add_section_link(self):
         """
         The foreign key widget should only show the "add related" button if the
@@ -3526,6 +3600,56 @@ class AdminViewPermissionsTest(TestCase):
         self.assertEqual(response.status_code, 302)
         # Domain may depend on contrib.sites tests also run
         self.assertRegex(response.url, "http://(testserver|example.com)/dummy/foo/")
+
+    def test_shortcut_view_without_permission_returns_403(self):
+        obj = ModelWithStringPrimaryKey.objects.create(string_pk="bar")
+        model_ctype = ContentType.objects.get_for_model(ModelWithStringPrimaryKey)
+        shortcut_url = reverse("admin:view_on_site", args=(model_ctype.pk, obj.pk))
+        # deleteuser has no view permission on ModelWithStringPrimaryKey.
+        self.client.force_login(self.deleteuser)
+        response = self.client.get(shortcut_url)
+        self.assertEqual(response.status_code, 403)
+
+    def test_shortcut_view_with_view_or_change_permission_success(self):
+        obj = ModelWithStringPrimaryKey.objects.create(string_pk="bar")
+        model_ctype = ContentType.objects.get_for_model(ModelWithStringPrimaryKey)
+        shortcut_url = reverse("admin:view_on_site", args=(model_ctype.pk, obj.pk))
+        opts = ModelWithStringPrimaryKey._meta
+        for permission in ["view", "change"]:
+            codename = get_permission_codename(permission, opts)
+            perm = get_perm(ModelWithStringPrimaryKey, codename)
+            with self.subTest(permission=permission):
+                self.viewuser.user_permissions.set([perm])
+                self.client.force_login(self.viewuser)
+                response = self.client.get(shortcut_url)
+                self.assertEqual(response.status_code, 302)
+
+    def test_shortcut_view_for_invalid_content_type_returns_404(self):
+        # An unknown or non-int content type id skips the permission check and
+        # falls back to the contenttypes shortcut view, which raises Http404.
+        self.client.force_login(self.deleteuser)
+        for content_type_id in [9999, "not-an-int", None]:
+            with self.subTest(content_type_id=content_type_id):
+                response = self.client.get(
+                    reverse("admin:view_on_site", args=(content_type_id, 1))
+                )
+                self.assertEqual(response.status_code, 404)
+
+    def test_shortcut_view_does_not_repeat_content_type_query(self):
+        obj = ModelWithStringPrimaryKey.objects.create(string_pk="bar")
+        model_ctype = ContentType.objects.get_for_model(ModelWithStringPrimaryKey)
+        shortcut_url = reverse("admin:view_on_site", args=(model_ctype.pk, obj.pk))
+        self.client.force_login(self.superuser)
+        # A warmup request populates the ContentType and Site caches, so only
+        # relevant queries are measured. The 4 expected queries are:
+        # 1. Load the session.
+        # 2. Load the user.
+        # 3. Look up the content type.
+        # 4. Fetch the target instance.
+        self.client.get(shortcut_url)
+        with self.assertNumQueries(4):
+            response = self.client.get(shortcut_url)
+        self.assertEqual(response.status_code, 302)
 
     def test_has_module_permission(self):
         """
@@ -4255,6 +4379,11 @@ class TestGenericRelations(TestCase):
         FunkyTag.objects.create(content_object=self.pl3, name="hott")
         response = self.client.get(reverse("admin:admin_views_funkytag_changelist"))
         self.assertContains(response, "%s</td>" % self.pl3)
+        self.assertContains(response, '<th scope="col" class="column-content_object">')
+        self.assertNotContains(
+            response,
+            '<th scope="col" class="sortable column-content_object">',
+        )
 
 
 @override_settings(ROOT_URLCONF="admin_views.urls")

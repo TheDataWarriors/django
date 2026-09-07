@@ -1,8 +1,8 @@
-============================================
-Django 6.1 release notes - UNDER DEVELOPMENT
-============================================
+========================
+Django 6.1 release notes
+========================
 
-*Expected August 2026*
+*August 5, 2026*
 
 Welcome to Django 6.1!
 
@@ -48,7 +48,7 @@ Django provides three fetch modes:
    cases of the "N+1 queries problem" to two queries without any work to
    maintain a list of fields to prefetch.
 
-3. ``RAISE`` raises a :exc:`~django.core.exceptions.FieldFetchBlocked`
+3. ``FETCH_RAISE`` raises a :exc:`~django.core.exceptions.FieldFetchBlocked`
    exception.
 
    This mode can prevent unintentional queries in performance-critical
@@ -507,6 +507,12 @@ Models
   case-sensitive, *raw* SQL references to aliases mixing case, such as when
   using :class:`.RawSQL`, might have to be adjusted to also make use of
   quoting.
+
+* :meth:`~django.db.models.Model._is_pk_set` now returns ``False`` for
+  ``DatabaseDefault`` values on unsaved instances.
+
+* ``fetch_mode=None`` is added to the signature of
+  :meth:`~django.db.models.Model.from_db`.
 
 System checks
 -------------

@@ -4,7 +4,7 @@ from unittest import mock
 from django.contrib import admin
 from django.contrib.admin.models import LogEntry
 from django.contrib.admin.options import IncorrectLookupParameters
-from django.contrib.admin.templatetags.admin_list import pagination
+from django.contrib.admin.templatetags.admin_list import pagination, result_headers
 from django.contrib.admin.tests import AdminSeleniumTestCase
 from django.contrib.admin.views.main import (
     ALL_VAR,
@@ -114,6 +114,20 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
         cl = m.get_changelist_instance(request)
         self.assertEqual(repr(cl), "<ChangeList: model=Child model_admin=ChildAdmin>")
+
+    def test_default_str_column_is_not_sortable(self):
+        GrandChild.objects.create(name="Grandchild")
+        m = admin.ModelAdmin(GrandChild, custom_site)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+        cl = m.get_changelist_instance(request)
+        headers = list(result_headers(cl))
+        self.assertEqual(cl.list_display[1], "__str__")
+        self.assertIs(headers[1]["sortable"], False)
+        response = m.changelist_view(request)
+        self.assertContains(response, '<th scope="col" class="column-__str__">')
+        self.assertNotContains(
+            response, '<th scope="col" class="sortable column-__str__">'
+        )
 
     def test_specified_ordering_by_f_expression(self):
         class OrderedByFBandAdmin(admin.ModelAdmin):
@@ -1726,6 +1740,13 @@ class ChangeListTests(TestCase):
         response = m.changelist_view(request)
         self.assertContains(response, parent.name)
         self.assertContains(response, child.name)
+        self.assertContains(
+            response, '<th scope="col" class="sortable column-parent__name">'
+        )
+        self.assertContains(
+            response,
+            '<th scope="col" class="sortable column-parent__parent__name">',
+        )
 
     def test_list_display_related_field_null(self):
         GrandChild.objects.create(name="I am parentless", parent=None)
@@ -1771,6 +1792,53 @@ class ChangeListTests(TestCase):
         request = self._mocked_authenticated_request("/", self.superuser)
         cl = m.get_changelist_instance(request)
         self.assertEqual(cl.get_ordering_field_columns(), {2: "asc"})
+
+    def test_list_display_first_degree_relation(self):
+        parent = Parent.objects.create(name="I am your parent")
+        child = Child.objects.create(name="I am your child", parent=parent)
+        grand = GrandChild.objects.create(name="I am your grandchild", parent=child)
+        GrandChild.objects.create(name="has sibling", parent=child, sibling=grand)
+
+        class GrandChildAdmin(admin.ModelAdmin):
+            list_display = ["name", "sibling"]
+
+        m = GrandChildAdmin(GrandChild, custom_site)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+        response = m.changelist_view(request)
+        self.assertContains(response, '<h2 class="main">I am your grandchild')
+
+    def test_list_display_second_degree_relation(self):
+        parent = Parent.objects.create(name="I am your parent")
+        child = Child.objects.create(name="I am your child", parent=parent)
+        GrandChild.objects.create(name="I am your grandchild", parent=child)
+
+        class GrandChildAdmin(admin.ModelAdmin):
+            list_display = ["name", "parent__parent"]
+
+        m = GrandChildAdmin(GrandChild, custom_site)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+        response = m.changelist_view(request)
+        self.assertNotContains(response, "Child object")
+        self.assertContains(response, "Parent object")
+
+    def test_list_display_related_field_uses_display_for_field(self):
+        # Related fields must be rendered with display_for_field(), not
+        # display_for_value(), so field-specific formatting, such as FileField
+        # links, is preserved.
+        genre = Genre.objects.create(name="Rock", file="documents/test.txt")
+        Musician.objects.create(name="John", genre=genre)
+
+        class MusicianAdmin(admin.ModelAdmin):
+            list_display = ["name", "genre__file"]
+
+        m = MusicianAdmin(Musician, custom_site)
+        request = self._mocked_authenticated_request("/musician/", self.superuser)
+        response = m.changelist_view(request)
+        self.assertContains(
+            response,
+            '<a href="/documents/test.txt">documents/test.txt</a>',
+            html=True,
+        )
 
     def test_list_display_related_field_boolean_display(self):
         """

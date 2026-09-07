@@ -1,0 +1,38 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '10 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout sandbox
+        uses: actions/checkout@v7
+        with:
+          # Shallow fetch, since this repo's `main` should be a pure mirror.
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: Rebuild main as upstream minus workflows
+        run: |
+          git remote add upstream https://github.com/django/django.git
+          git fetch --depth=1 upstream main
+
+          # Mirror upstream main + one commit removing workflows, since
+          # GITHUB_TOKEN is forbidden to push anything with workflows.
+          git checkout -B mirror upstream/main
+          if [ -d .github/workflows ]; then
+            git rm -r --quiet .github/workflows
+            git -c user.name="sandbox-sync" \
+                -c user.email="sandbox-sync@users.noreply.github.com" \
+                commit -m "Stripped upstream workflows."
+          fi
+
+          git push --force origin mirror:refs/heads/main

@@ -58,7 +58,8 @@ Minor features
 :mod:`django.contrib.gis`
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* ...
+* :class:`~django.contrib.gis.gdal.DataSource` now preserves millisecond
+  precision when reading time and datetime fields.
 
 :mod:`django.contrib.messages`
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -265,6 +266,23 @@ This section describes changes that may be needed in third-party database
 backends.
 
 * ...
+
+:mod:`django.contrib.admin`
+---------------------------
+
+* The admin ``view_on_site`` URL now consistently returns an HTTP 403 response
+  when a staff user lacks view or change permission for the target model.
+
+* The admin history view now checks permissions before object existence,
+  consistently returning an HTTP 403 response for staff users without the view
+  or change permission regardless of whether the object exists.
+
+:mod:`django.contrib.gis`
+-------------------------
+
+* The seconds value returned by
+  :meth:`~django.contrib.gis.gdal.Field.as_datetime` is now a ``c_float``
+  rather than a ``c_int``.
 
 Miscellaneous
 -------------
